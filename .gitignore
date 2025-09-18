@@ -1,0 +1,33 @@
+# Ignore virtual environment
+venv/
+.env/
+.venv/
+
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# VS Code settings (optional)
+.vscode/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# macOS / Linux / Windows system files
+.DS_Store
+Thumbs.db
+
+# Python-related logs
+*.log
+
+# Environment variables / secrets
+.env
+*.env
+
+# FAISS index & metadata (kalau nggak mau di-push)
+vector.index
+chunks.pkl
+
+# Ollama model cache (opsional, kalau local model download)
+~/.ollama/
