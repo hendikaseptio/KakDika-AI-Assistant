@@ -746,8 +746,8 @@
             let fullResponse = '';
 
             const query = encodeURIComponent(userInput);
-            // const url = `http://127.0.0.1:8000/chat_stream?session_id=${chatInstance.sessionId}&message=${query}`;
-            const url = `http://192.168.30.234:8000/chat_stream?session_id=${chatInstance.sessionId}&message=${query}`;
+             const url = `http://127.0.0.1:8000/chat_stream?session_id=${chatInstance.sessionId}&message=${query}`;
+            // const url = `http://192.168.30.234:8000/chat_stream?session_id=${chatInstance.sessionId}&message=${query}`;
 
             chatInstance.evtSource = new EventSource(url);
 

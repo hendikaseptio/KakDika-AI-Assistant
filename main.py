@@ -2,16 +2,20 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sentence_transformers import SentenceTransformer
+from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+from typing import List
+from numpy.linalg import norm
+
+import chromadb
 import faiss
 import pickle
 import os
 import asyncio
 import json
 import ollama
-from typing import List
 import re
-from numpy.linalg import norm
 import numpy as np
+import time
 
 
 app = FastAPI()
@@ -23,18 +27,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# baru bre
-# Simpan riwayat chat per session_id di RAM (dictionary)
 chat_histories = {}
 
-MAX_HISTORY_LENGTH = 5  # batasi 5 pesan terakhir
-# Load FAISS index & texts untuk retrieval
-model = SentenceTransformer("all-MiniLM-L6-v2")
-dimension = 384
-index = faiss.IndexFlatL2(dimension)
-
-chunks_list = []
-chunks_metadata = []
+MAX_HISTORY_LENGTH = 5 
+embedding_function = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+chroma_client = chromadb.PersistentClient(path="./chroma_data")
+current_collection = None
+collection = chroma_client.get_or_create_collection(
+    name="documents",
+    embedding_function=embedding_function
+)
 
 def cosine_sim(a, b):
     return np.dot(a, b) / (norm(a) * norm(b) + 1e-10)
@@ -179,10 +181,16 @@ def chunk_text(text, max_length=400):
     return chunks, metadata
 
 def load_documents():
-    global chunks_list, chunks_metadata, index
-    chunks_list.clear()
-    chunks_metadata.clear()
-    index.reset()
+    global current_collection
+    
+    # Buat nama collection baru dengan timestamp supaya unik
+    collection_name = f"documents_{int(time.time())}"
+
+    # Buat collection baru
+    current_collection = chroma_client.get_or_create_collection(
+        name=collection_name,
+        embedding_function=embedding_function
+    )
 
     for filename in os.listdir("doc"):
         path = os.path.join("doc", filename)
@@ -190,51 +198,36 @@ def load_documents():
             with open(path, "r", encoding="utf-8") as f:
                 text = f.read()
                 chunks, metadata = chunk_text(text)
-                embeddings = model.encode(chunks)
-                index.add(np.array(embeddings).astype("float32"))
-                chunks_list.extend(chunks)
-                chunks_metadata.extend(metadata)
+
+                documents = []
+                metadatas = []
+                ids = []
+
+                for i, chunk in enumerate(chunks):
+                    doc_id = f"{filename}_{i}"
+                    documents.append(chunk)
+                    metadatas.append(metadata[i])
+                    ids.append(doc_id)
+
+                current_collection.add(documents=documents, metadatas=metadatas, ids=ids)
 
 load_documents()
 
 # retrieve chunk
 def retrieve_chunks_rag(query: str, top_k: int = 3) -> List[str]:
-    q_embed = model.encode([query]).astype("float32")
-    D, I = index.search(q_embed, 10)
+    global current_collection
+    if current_collection is None:
+        return []
+    
+    results = current_collection.query(
+        query_texts=[query],
+        n_results=top_k
+    )
 
-    candidates = []
-    for idx in I[0]:
-        if idx < len(chunks_list):
-            chunk = chunks_list[idx]
-            meta = chunks_metadata[idx]
-            title = meta.get("title", "").lower()
-            chunk_type = meta.get("type", "h2")
+    if not results["documents"]:
+        return []
 
-            chunk_embed = model.encode([chunk])[0]
-            score = cosine_sim(q_embed[0], chunk_embed)
-
-            type_weights = {"h1": 0.05, "h2": 0.1, "h3": 0.15}
-            score += type_weights.get(chunk_type, 0)
-
-            if any(word in title for word in query.split()):
-                score += 0.1
-            if chunk_type == "h1" and any(word in title for word in query.split()):
-                score += 0.2
-
-            candidates.append((score, chunk.strip()))
-
-    candidates = [c for c in candidates if c[0] > 0.3]
-    candidates.sort(key=lambda x: x[0], reverse=True)
-
-    seen = set()
-    unique_results = []
-    for score, text in candidates:
-        norm_text = re.sub(r'\s+', ' ', text.strip().lower())
-        if norm_text not in seen:
-            seen.add(norm_text)
-            unique_results.append(text)
-
-    return unique_results[:top_k]
+    return [doc for doc in results["documents"][0]]
 
 # timpa history
 def trim_history(history):
@@ -245,16 +238,10 @@ def trim_history(history):
 # Generator streaming dari model AI
 async def chat_stream_generator(session_id: str, user_message: str):
     try:
-        # Ambil riwayat chat user, jika belum ada buat baru
         history = chat_histories.get(session_id, [])
-
-        # Tambah pesan user ke riwayat
         history.append({"role": "user", "content": user_message})
-
-        # Batasi panjang riwayat
         history = trim_history(history)
 
-        # Simpan kembali
         chat_histories[session_id] = history
 
         retrieved_chunks = retrieve_chunks_rag(user_message, top_k=3)
@@ -268,13 +255,11 @@ async def chat_stream_generator(session_id: str, user_message: str):
             "- Jika saya **tidak menemukan jawaban** dari dokumentasi, saya akan menjawab dengan kalimat:\n"
             "  'Maaf, informasi itu belum ada di dokumentasi saya.'\n"
             "- Saya akan menjawab dengan **singkat, jelas, dan sopan**.\n\n"
+            "- Semua informasi utamakan ambil dari dokumentasi.\n"
             "==== DOKUMENTASI MULAI ====\n"
             f"{context_text}\n"
             "==== DOKUMENTASI SELESAI ====\n"
         )
-
-
-        # context_text = "\n\n".join(retrieved_chunks) if retrieved_chunks else "Tidak ada informasi relevan ditemukan."
 
         system_prompt = {
             "role": "system",
@@ -283,15 +268,14 @@ async def chat_stream_generator(session_id: str, user_message: str):
 
         messages = [system_prompt] + history
 
-        # Panggil ollama dengan streaming
+        # ollama_base_url = "http://192.168.30.234:11434"
+        # client = ollama.Client(host=ollama_base_url)
         response = ollama.chat(
             model='gemma:2b',
-            # model='mistral:instruct',
             messages=messages,
             stream=True
         )
 
-        # Streaming token ke frontend
         full_response = ""
         for chunk in response:
             if 'message' in chunk and 'content' in chunk['message']:
@@ -319,12 +303,3 @@ async def chat_stream(request: Request):
         chat_stream_generator(session_id, user_message),
         media_type="text/event-stream"
     )
-
-# # Register route
-# app.include_router(search.router)
-# app.include_router(chat.router)
-
-# # Load dokumen saat startup
-# @app.on_event("startup")
-# def startup_event():
-#     load_documents()
