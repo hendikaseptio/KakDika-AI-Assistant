@@ -1,6 +1,3 @@
-Berikut contoh **README.md** yang bisa kamu pakai untuk project kamu berdasarkan perintah yang kamu berikan:
-
-````markdown
 # KakDika AI Assistant
 
 Sebuah project AI Assistant yang dapat dijalankan menggunakan FastAPI dan Uvicorn.
